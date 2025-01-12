@@ -90,6 +90,7 @@ The program will parse all messages in `messages.txt` and display the results.
   - Money received
   - Payments to merchants or paybills
   - Sending money
+  - Fuliza transactions
   - Airtime purchases
   - Withdrawals
   - Balance checks
