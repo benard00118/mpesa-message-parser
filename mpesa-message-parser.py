@@ -12,34 +12,31 @@ class MPESAMessageParser:
             
             # Main transaction patterns
             r"(?:"
-            # Pattern for receiving money
+            # Pattern for Fuliza M-PESA usage (made more flexible)
+            r"(?:Fuliza\sM-PESA\samount\sis\sKsh\s*(?P<fuliza_amount>[\d,.]+)\.?\s*"
+            r"Interest\scharged\sKsh\s*(?P<fuliza_interest>[\d,.]+)\.?\s*"
+            r"Total\sFuliza\sM-PESA\soutstanding\samount\sis\sKsh\s*(?P<fuliza_total>[\d,.]+)\s*due\son\s(?P<fuliza_due_date>\d{2}/\d{2}/\d{2}))|"
+            
+            # Pattern for Fuliza M-PESA repayment (made more flexible)
+            r"(?:Ksh\s*(?P<fuliza_repaid>[\d,.]+)\sfrom\syour\sM-PESA\shas\sbeen\sused\sto\s(?:fully|partially)\spay\syour\soutstanding\sFuliza\sM-PESA\.?"
+            r"(?:\s*Available\sFuliza\sM-PESA\slimit\sis\sKsh\s*(?P<fuliza_limit>[\d,.]+))?)|"
+            
+            # Existing patterns...
             r"(?:You\shave\sreceived\sKsh(?P<received_amount>[\d,.]+)\sfrom\s(?P<sender_name>[^0-9]+?)(?:\s(?P<sender_phone>\d+))?)|"
-            
-            # Pattern for payments to till/paybill/merchant
             r"(?:Ksh(?P<paid_amount>[\d,.]+)\spaid\sto\s(?P<paid_to>[^.]+))|"
-            
-            # Pattern for sending money (including to bank accounts)
             r"(?:Ksh(?P<sent_amount>[\d,.]+)\ssent\sto\s(?P<recipient>[^0-9]+?)(?:\sfor\saccount\s(?P<account_number>[^\s]+))?(?:\s(?P<recipient_phone>\d+))?)|"
-            
-            # Pattern for M-Shwari transfers
             r"(?:Ksh(?P<mshwari_amount>[\d,.]+)\stransferred\s(?P<mshwari_direction>(?:from|to))\sM-Shwari\saccount)|"
-            
-            # Pattern for airtime purchase
             r"(?:You\sbought\sKsh(?P<airtime_amount>[\d,.]+)\sof\sairtime(?:\sfor\s(?P<airtime_phone>\d+))?)|"
-            
-            # Pattern for withdrawal - Updated to be more flexible with spacing
             r"(?:(?:on\s[^.]+?)?\s*Withdraw\s*Ksh(?P<withdraw_amount>[\d,.]+)\sfrom\s(?P<agent_details>[^.]+))|"
-            
-            # Pattern for balance check
             r"(?:Your\saccount\sbalance\swas:\sM-PESA\sAccount\s:\sKsh(?P<balance_amount>[\d,.]+))"
             r")"
             
-            # Date and time - Made more flexible with optional spaces
-            r".*?(?:on\s)?(?P<date>\d{1,2}/\d{1,2}/\d{2})\sat\s(?P<time>\d{1,2}:\d{2}\s*[AP]M)"
+            # Balance(s) - Made more flexible to handle different formats
+            r"(?:.*?(?:New\s)?(?:M-PESA\s)?balance(?:\sis)?\sKsh\s*(?P<mpesa_balance>[\d,.]+))?"
+            r"(?:.*?M-Shwari\s(?:balance|saving\saccount\sbalance)(?:\sis)?\sKsh\s*(?P<mshwari_balance>[\d,.]+))?"
             
-            # Balance(s)
-            r"(?:.*?(?:New\s)?(?:M-PESA\s)?balance(?:\sis)?\sKsh(?P<mpesa_balance>[\d,.]+))"
-            r"(?:.*?M-Shwari\s(?:balance|saving\saccount\sbalance)(?:\sis)?\sKsh(?P<mshwari_balance>[\d,.]+))?"
+            # Optional date/time pattern
+            r"(?:.*?(?:on\s)?(?P<date>\d{1,2}/\d{1,2}/\d{2})(?:\sat\s(?P<time>\d{1,2}:\d{2}\s*[AP]M))?)?"
             
             # Transaction cost
             r"(?:.*?Transaction\scost(?:\s|,\s)?Ksh(?P<transaction_cost>\.?\d+\.?\d*)?)?"
@@ -48,9 +45,9 @@ class MPESAMessageParser:
             r"(?:.*?Amount\syou\scan\stransact\swithin\sthe\sday\sis\s(?P<daily_limit>[\d,.]+))?"
         )
         
-        self.pattern = re.compile(pattern_str)
+        self.pattern = re.compile(pattern_str, re.IGNORECASE)  # Added IGNORECASE flag
         
-        # Pattern for failed transactions
+        # Updated failed pattern to include more Fuliza-related failures
         self.failed_pattern = re.compile(
             r"Failed\.\s"
             r"(?:"
@@ -58,15 +55,19 @@ class MPESAMessageParser:
             r"(?:Insufficient\sfunds\sin\syour\sM-PESA\saccount)|"
             r"(?:You\shave\sinsufficient\sfunds)|"
             r"(?:Insufficient\sfunds\sin\syour\sM-PESA\saccount\sas\swell\sas\sFuliza\sM-PESA)|"
-            r"(?:You\shave\sinsufficient\sfunds\sin\syour\sM-Shwari\saccount)"
+            r"(?:You\shave\sinsufficient\sfunds\sin\syour\sM-Shwari\saccount)|"
+            r"(?:You\shave\sreached\syour\sFuliza\sM-PESA\slimit)|"
+            r"(?:Your\sFuliza\sM-PESA\slimit\sis\snot\savailable\sat\sthis\stime)"
             r")"
         )
 
-    # Rest of the class implementation remains the same
     def clean_amount(self, amount_str: str) -> float:
         """Clean amount string and convert to float."""
-        # Remove commas
-        cleaned = amount_str.replace(',', '')
+        if not amount_str:
+            return 0.0
+            
+        # Remove commas and spaces
+        cleaned = amount_str.replace(',', '').replace(' ', '')
         
         # Handle case where amount starts with decimal point
         if cleaned.startswith('.'):
@@ -105,7 +106,13 @@ class MPESAMessageParser:
         result['status'] = 'FAILED' if failed_match else 'SUCCESS'
         
         # Determine transaction type
-        if result.get('received_amount'):
+        if result.get('fuliza_amount'):
+            result['transaction_type'] = 'FULIZA_USED'
+            result['amount'] = result.pop('fuliza_amount')
+        elif result.get('fuliza_repaid'):
+            result['transaction_type'] = 'FULIZA_REPAYMENT'
+            result['amount'] = result.pop('fuliza_repaid')
+        elif result.get('received_amount'):
             result['transaction_type'] = 'RECEIVED'
             result['amount'] = result.pop('received_amount')
         elif result.get('paid_amount'):
@@ -131,7 +138,11 @@ class MPESAMessageParser:
             result['amount'] = result.pop('balance_amount')
             
         # Convert numeric values to float using the clean_amount method
-        for key in ['amount', 'mpesa_balance', 'mshwari_balance', 'transaction_cost', 'daily_limit']:
+        numeric_fields = [
+            'amount', 'mpesa_balance', 'mshwari_balance', 'transaction_cost', 
+            'daily_limit', 'fuliza_interest', 'fuliza_total', 'fuliza_limit'
+        ]
+        for key in numeric_fields:
             if key in result:
                 try:
                     result[key] = self.clean_amount(result[key])
@@ -143,8 +154,11 @@ class MPESAMessageParser:
         if 'date' in result and 'time' in result:
             datetime_str = f"{result['date']} {result['time']}"
             result['datetime'] = datetime.strptime(datetime_str, '%d/%m/%y %I:%M %p')
+        elif 'date' in result:  # Handle Fuliza messages that might only have a date
+            result['date'] = datetime.strptime(result['date'], '%d/%m/%y').date()
             
         return result
+
 
 # def test_parser():
 #     parser = MPESAMessageParser()
@@ -171,7 +185,6 @@ def test_parser_with_user_input():
     print("Enter your M-PESA message below (type 'exit' to quit):\n")
     
     while True:
-        # Prompt the user for input
         message = input("Enter M-PESA message: ").strip()
         
         if message.lower() == 'exit':  # Exit condition
